@@ -46,12 +46,11 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
 
     /// Lock `name`.
     async fn lock(&mut self, name: &str) -> Result<(), Error> {
-        let mut acquired_lock = false;
         let lock_key = format!("LOCK-{}", name);
         let lock_value = format!("locked-{}", self.process_id);
         let mut round = 0;
 
-        while acquired_lock != true {
+        loop {
             // TODO: sleep for a variable amount of time for congestion control.
 
             // Check the current value of the lock.
@@ -62,7 +61,6 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
 
             // We currently have the lock.
             if lock_string == lock_value {
-                acquired_lock = true;
                 break;
             }
 
@@ -78,7 +76,7 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
             // Check if another process wrote to a round > our current round.
             let keys = self.storage.list_keys().await?;
             let prefix = format!("REQUEST-LOCK-{}", name);
-            let mut request_keys: Vec<_> = keys
+            let request_keys: Vec<_> = keys
                 .into_iter()
                 .filter(|k| k.starts_with(&prefix))
                 .map(|k| {
@@ -90,11 +88,31 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
                 })
                 .collect();
 
-            request_keys.sort();
-            let (current_round, pid) = request_keys.last().cloned().unwrap_or((0, self.process_id));
+            // We lose the election if at least one other process wrote to a round >
+            // our current round counter.
+            let lost = {
+                let mut lost = false;
+
+                for (key_round, key_pid) in request_keys.iter() {
+                    // Note that we may observe requests from ourselves from a
+                    // round greater than the one we are currently on. Those
+                    // are from a currently ongoing election that we already
+                    // lost, and will be cleaned up when the eventual winner
+                    // unlocks.
+                    if *key_round > round && *key_pid != self.process_id {
+                        lost = true;
+                        break;
+                    }
+                }
+
+                lost
+            };
 
             // Someone has advanced beyond our current round, so we need to try again later
-            if current_round > round {
+            if lost {
+                // We need to reset the round counter to 0, because there will be
+                // a new election for the next lock acquisition.
+                round = 0;
                 continue;
             }
 
@@ -102,9 +120,6 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
             let won = {
                 if round < 2 {
                     // Two rounds have not happened yet, so impossible.
-                    false
-                } else if pid != self.process_id {
-                    // Someone else participated in the current round, so we didn't win it.
                     false
                 } else {
                     let mut won = true;
@@ -127,7 +142,6 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
                 // TODO: we need the clone at the moment because the compiler
                 // cannot derive that we will return after this break.
                 self.storage.set(&lock_key, lock_value.clone()).await?;
-                acquired_lock = true;
                 break;
             }
 
@@ -137,8 +151,6 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
             self.storage.set(&request_key, "true".to_string()).await?;
         }
 
-        // We have the lock.
-        assert_eq!(acquired_lock, true);
         Ok(())
     }
 
@@ -220,11 +232,6 @@ mod tests {
     use futures_executor::block_on;
 
     use crate::{Error, Storage, StorageLock};
-
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
 
     pub async fn lock_impl_test_single_thread<S: Storage>(
         mut lock_impl: StorageLock<S>,
