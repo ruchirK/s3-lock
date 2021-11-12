@@ -46,30 +46,11 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
 
     /// Lock `name`.
     async fn lock(&mut self, name: &str) -> Result<(), Error> {
-        let lock_key = format!("LOCK-{}", name);
-        let lock_value = format!("locked-{}", self.process_id);
         let mut round = 0;
 
         loop {
             // TODO: sleep for a variable amount of time for congestion control.
 
-            // Check the current value of the lock.
-            let lock_string = match self.storage.get(&lock_key).await? {
-                None => "unlocked".to_string(),
-                Some(lock_string) => lock_string,
-            };
-
-            // We currently have the lock.
-            if lock_string == lock_value {
-                break;
-            }
-
-            // Someone else has the lock so we need to try again later.
-            if lock_string.starts_with("locked") {
-                continue;
-            }
-
-            assert_eq!(lock_string, "unlocked");
             // Check if another process wrote to a round > our current round.
             let keys = self.storage.list_keys().await?;
             let prefix = format!("REQUEST-LOCK-{}", name);
@@ -90,12 +71,15 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
             let lost = {
                 let mut lost = false;
 
+                // First, update our knowledge of the current round based on what
+                // we might have already written down
                 for (key_round, key_pid) in request_keys.iter() {
-                    // Note that we may observe requests from ourselves from a
-                    // round greater than the one we are currently on. Those
-                    // are from a currently ongoing election that we already
-                    // lost, and will be cleaned up when the eventual winner
-                    // unlocks.
+                    if *key_pid == self.process_id && *key_round > round {
+                        round = *key_round;
+                    }
+                }
+
+                for (key_round, key_pid) in request_keys.iter() {
                     if *key_round > round && *key_pid != self.process_id {
                         lost = true;
                         break;
@@ -132,10 +116,6 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
             };
 
             if won {
-                // We have the lock and can set it to our desired key.
-                // TODO: we need the clone at the moment because the compiler
-                // cannot derive that we will return after this break.
-                self.storage.set(&lock_key, lock_value.clone()).await?;
                 break;
             }
 
@@ -150,39 +130,53 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
 
     /// Unlock `name`.
     async fn unlock(&mut self, name: &str) -> Result<(), Error> {
-        let lock_key = format!("LOCK-{}", name);
-        let lock_value = format!("locked-{}", self.process_id);
-
-        // Check the current value of the lock.
-        let lock_string = match self.storage.get(&lock_key).await? {
-            None => "unlocked".to_string(),
-            Some(lock_string) => lock_string,
-        };
-
-        if lock_string != lock_value {
-            return Err(Error::from("invalid unlock, don't currently have lock"));
-        }
-
-        let prefix = format!("REQUEST-LOCK-{}-{}", name, self.process_id);
+        let prefix = format!("REQUEST-LOCK-{}", name);
         let keys = self.storage.list_keys().await?;
         let mut request_keys: Vec<_> = keys
             .into_iter()
             .filter(|k| k.starts_with(&prefix))
             .map(|k| {
                 let split: Vec<_> = k.split('-').collect();
+                let process = split[3].parse::<u64>().expect("TODO");
                 let round = split[4].parse::<u64>().expect("TODO");
 
-                (round, k)
+                (round, process, k)
             })
             .collect();
 
-        request_keys.sort();
-
-        for (_, key) in request_keys {
-            self.storage.delete(&key).await?;
+        let mut last_round = 0;
+        for (key_round, key_pid, _) in request_keys.iter() {
+            if *key_pid == self.process_id && *key_round > last_round {
+                last_round = *key_round;
+            }
         }
 
-        self.storage.set(&lock_key, "unlocked".to_string()).await?;
+        let valid_lock = {
+            if last_round < 2 {
+                false
+            } else {
+                let mut valid = true;
+                for (key_round, key_pid, _) in request_keys.iter() {
+                    if *key_pid != self.process_id && *key_round >= last_round {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                valid
+            }
+        };
+
+        if !valid_lock {
+            return Err(Error::from("invalid unlock, don't currently have lock"));
+        }
+
+        request_keys.sort();
+        for (_, key_pid, key) in request_keys.iter() {
+            if *key_pid == self.process_id {
+                self.storage.delete(&key).await?;
+            }
+        }
 
         Ok(())
     }
