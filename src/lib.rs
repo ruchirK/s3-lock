@@ -66,9 +66,6 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
 
             // Someone else has the lock so we need to try again later.
             if lock_string.starts_with("locked") {
-                // We need to reset our round counter to 0, because there will be
-                // a brand new election for the next time someone gets the lock.
-                round = 0;
                 continue;
             }
 
@@ -110,9 +107,6 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
 
             // Someone has advanced beyond our current round, so we need to try again later
             if lost {
-                // We need to reset the round counter to 0, because there will be
-                // a new election for the next lock acquisition.
-                round = 0;
                 continue;
             }
 
@@ -169,14 +163,22 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
             return Err(Error::from("invalid unlock, don't currently have lock"));
         }
 
-        let prefix = format!("REQUEST-LOCK-{}", name);
+        let prefix = format!("REQUEST-LOCK-{}-{}", name, self.process_id);
         let keys = self.storage.list_keys().await?;
-        let request_keys: Vec<_> = keys
+        let mut request_keys: Vec<_> = keys
             .into_iter()
             .filter(|k| k.starts_with(&prefix))
+            .map(|k| {
+                let split: Vec<_> = k.split('-').collect();
+                let round = split[4].parse::<u64>().expect("TODO");
+
+                (round, k)
+            })
             .collect();
 
-        for key in request_keys {
+        request_keys.sort();
+
+        for (_, key) in request_keys {
             self.storage.delete(&key).await?;
         }
 
