@@ -4,166 +4,125 @@ CONSTANT Threads
 (*--algorithm s3lock
 
 variables 
-    lock = "none",
-    MaxRetries = 1000,
+    MaxRounds = 20,
     rounds = [t \in Threads |-> 0];
   
 fair process thread \in Threads
-    variables round = 0, retries = 0;
+    variables round = 0;
 begin
-    \* Try to bound the size of the model?
-    P0: retries := retries + 1;
-        if retries > MaxRetries then
-            goto FINISH;
-        end if;
-    P0_1: round := 0;
-    
-    \* Check if the lock is currently held and if so, reset ourselves.
-    P1: if lock /= "none" then
-    P1_1:   goto P0;
+
+\* Acquire a lock over a shared resource.
+LOCK:
+    while TRUE do
+L1:     if round > MaxRounds then
+           goto FINISH;
         end if;
     
-    \* Check if another thread has advanced beyond us, and if so, reset ourselves.
-    P2: if \E t \in Threads \ {self}: rounds[t] > round then
-            goto P0;
+        \* Check if another thread has advanced beyond us, and if so, reset ourselves.
+L2:     if \E t \in Threads \ {self}: rounds[t] > round then
+            goto LOCK;
         end if;
         
-    \* If we haven't played two rounds yet then we cannot possibly win yet, try
-    \* to play another round.
-    P3_1: if round < 2 then
-            goto P8;
-          end if;
+        \* If we haven't played two rounds yet then we cannot possibly win yet, try
+        \* to play another round.
+L3:     if round < 2 then
+            goto INCREMENT;
+        end if;
     
-    \* Check if we won the last two rounds and if not, try to play another
-    \* round.      
-    P3_2: if \E t \in Threads \ {self}: rounds[t] > (round - 2) then
-            goto P8;
-         end if;
+        \* Check if we won the last two rounds and if so, enter the critical section.
+ L4:    if \A t \in Threads \ {self}: rounds[t] <= (round - 2) then
+            goto CS;
+        end if;
+        \* Try to win the next round.
+ INCREMENT:
+        round := round + 1;
+ WRITE:
+        rounds[self] := round;
+
+    end while;
     
-    \* We won the lock.    
-    P4:  lock := self;
-    CS:  skip;
-    
-    \* Unlock the lock.
-    \* Note that P5 differs from the rust impl.
-    P5:  rounds[self] := 0;
-    P6:  lock := "none";
-    
-    \* Exit the game. Only here to bound the model size.
-    P7:  goto FINISH;
-    
-    \* Try to win the next round.
-    P8:  round := round + 1;
-    P9:  rounds[self] := round;
-    P10: goto P1;
-    
-    FINISH: skip;
+ \* Critical section. Only one process should make it here at a time.
+CS:  skip;
+
+\* Unlock a shared resource.
+UNLOCK:
+    rounds[self] := 0;
+
+\* Extra label, only here to bound the model size.
+FINISH: skip;
 
 end process;
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "7e5cf600" /\ chksum(tla) = "eeb3ea6f")
-VARIABLES lock, MaxRetries, rounds, pc, round, retries
+\* BEGIN TRANSLATION (chksum(pcal) = "c2d955dd" /\ chksum(tla) = "b3685083")
+VARIABLES MaxRounds, rounds, pc, round
 
-vars == << lock, MaxRetries, rounds, pc, round, retries >>
+vars == << MaxRounds, rounds, pc, round >>
 
 ProcSet == (Threads)
 
 Init == (* Global variables *)
-        /\ lock = "none"
-        /\ MaxRetries = 1000
+        /\ MaxRounds = 20
         /\ rounds = [t \in Threads |-> 0]
         (* Process thread *)
         /\ round = [self \in Threads |-> 0]
-        /\ retries = [self \in Threads |-> 0]
-        /\ pc = [self \in ProcSet |-> "P0"]
+        /\ pc = [self \in ProcSet |-> "LOCK"]
 
-P0(self) == /\ pc[self] = "P0"
-            /\ retries' = [retries EXCEPT ![self] = retries[self] + 1]
-            /\ IF retries'[self] > MaxRetries
+LOCK(self) == /\ pc[self] = "LOCK"
+              /\ pc' = [pc EXCEPT ![self] = "L1"]
+              /\ UNCHANGED << MaxRounds, rounds, round >>
+
+L1(self) == /\ pc[self] = "L1"
+            /\ IF round[self] > MaxRounds
                   THEN /\ pc' = [pc EXCEPT ![self] = "FINISH"]
-                  ELSE /\ pc' = [pc EXCEPT ![self] = "P0_1"]
-            /\ UNCHANGED << lock, MaxRetries, rounds, round >>
+                  ELSE /\ pc' = [pc EXCEPT ![self] = "L2"]
+            /\ UNCHANGED << MaxRounds, rounds, round >>
 
-P0_1(self) == /\ pc[self] = "P0_1"
-              /\ round' = [round EXCEPT ![self] = 0]
-              /\ pc' = [pc EXCEPT ![self] = "P1"]
-              /\ UNCHANGED << lock, MaxRetries, rounds, retries >>
-
-P1(self) == /\ pc[self] = "P1"
-            /\ IF lock /= "none"
-                  THEN /\ pc' = [pc EXCEPT ![self] = "P1_1"]
-                  ELSE /\ pc' = [pc EXCEPT ![self] = "P2"]
-            /\ UNCHANGED << lock, MaxRetries, rounds, round, retries >>
-
-P1_1(self) == /\ pc[self] = "P1_1"
-              /\ pc' = [pc EXCEPT ![self] = "P0"]
-              /\ UNCHANGED << lock, MaxRetries, rounds, round, retries >>
-
-P2(self) == /\ pc[self] = "P2"
+L2(self) == /\ pc[self] = "L2"
             /\ IF \E t \in Threads \ {self}: rounds[t] > round[self]
-                  THEN /\ pc' = [pc EXCEPT ![self] = "P0"]
-                  ELSE /\ pc' = [pc EXCEPT ![self] = "P3_1"]
-            /\ UNCHANGED << lock, MaxRetries, rounds, round, retries >>
+                  THEN /\ pc' = [pc EXCEPT ![self] = "LOCK"]
+                  ELSE /\ pc' = [pc EXCEPT ![self] = "L3"]
+            /\ UNCHANGED << MaxRounds, rounds, round >>
 
-P3_1(self) == /\ pc[self] = "P3_1"
-              /\ IF round[self] < 2
-                    THEN /\ pc' = [pc EXCEPT ![self] = "P8"]
-                    ELSE /\ pc' = [pc EXCEPT ![self] = "P3_2"]
-              /\ UNCHANGED << lock, MaxRetries, rounds, round, retries >>
+L3(self) == /\ pc[self] = "L3"
+            /\ IF round[self] < 2
+                  THEN /\ pc' = [pc EXCEPT ![self] = "INCREMENT"]
+                  ELSE /\ pc' = [pc EXCEPT ![self] = "L4"]
+            /\ UNCHANGED << MaxRounds, rounds, round >>
 
-P3_2(self) == /\ pc[self] = "P3_2"
-              /\ IF \E t \in Threads \ {self}: rounds[t] > (round[self] - 2)
-                    THEN /\ pc' = [pc EXCEPT ![self] = "P8"]
-                    ELSE /\ pc' = [pc EXCEPT ![self] = "P4"]
-              /\ UNCHANGED << lock, MaxRetries, rounds, round, retries >>
+L4(self) == /\ pc[self] = "L4"
+            /\ IF \A t \in Threads \ {self}: rounds[t] <= (round[self] - 2)
+                  THEN /\ pc' = [pc EXCEPT ![self] = "CS"]
+                  ELSE /\ pc' = [pc EXCEPT ![self] = "INCREMENT"]
+            /\ UNCHANGED << MaxRounds, rounds, round >>
 
-P4(self) == /\ pc[self] = "P4"
-            /\ lock' = self
-            /\ pc' = [pc EXCEPT ![self] = "CS"]
-            /\ UNCHANGED << MaxRetries, rounds, round, retries >>
+INCREMENT(self) == /\ pc[self] = "INCREMENT"
+                   /\ round' = [round EXCEPT ![self] = round[self] + 1]
+                   /\ pc' = [pc EXCEPT ![self] = "WRITE"]
+                   /\ UNCHANGED << MaxRounds, rounds >>
+
+WRITE(self) == /\ pc[self] = "WRITE"
+               /\ rounds' = [rounds EXCEPT ![self] = round[self]]
+               /\ pc' = [pc EXCEPT ![self] = "LOCK"]
+               /\ UNCHANGED << MaxRounds, round >>
 
 CS(self) == /\ pc[self] = "CS"
             /\ TRUE
-            /\ pc' = [pc EXCEPT ![self] = "P5"]
-            /\ UNCHANGED << lock, MaxRetries, rounds, round, retries >>
+            /\ pc' = [pc EXCEPT ![self] = "UNLOCK"]
+            /\ UNCHANGED << MaxRounds, rounds, round >>
 
-P5(self) == /\ pc[self] = "P5"
-            /\ rounds' = [rounds EXCEPT ![self] = 0]
-            /\ pc' = [pc EXCEPT ![self] = "P6"]
-            /\ UNCHANGED << lock, MaxRetries, round, retries >>
-
-P6(self) == /\ pc[self] = "P6"
-            /\ lock' = "none"
-            /\ pc' = [pc EXCEPT ![self] = "P7"]
-            /\ UNCHANGED << MaxRetries, rounds, round, retries >>
-
-P7(self) == /\ pc[self] = "P7"
-            /\ pc' = [pc EXCEPT ![self] = "FINISH"]
-            /\ UNCHANGED << lock, MaxRetries, rounds, round, retries >>
-
-P8(self) == /\ pc[self] = "P8"
-            /\ round' = [round EXCEPT ![self] = round[self] + 1]
-            /\ pc' = [pc EXCEPT ![self] = "P9"]
-            /\ UNCHANGED << lock, MaxRetries, rounds, retries >>
-
-P9(self) == /\ pc[self] = "P9"
-            /\ rounds' = [rounds EXCEPT ![self] = round[self]]
-            /\ pc' = [pc EXCEPT ![self] = "P10"]
-            /\ UNCHANGED << lock, MaxRetries, round, retries >>
-
-P10(self) == /\ pc[self] = "P10"
-             /\ pc' = [pc EXCEPT ![self] = "P1"]
-             /\ UNCHANGED << lock, MaxRetries, rounds, round, retries >>
+UNLOCK(self) == /\ pc[self] = "UNLOCK"
+                /\ rounds' = [rounds EXCEPT ![self] = 0]
+                /\ pc' = [pc EXCEPT ![self] = "FINISH"]
+                /\ UNCHANGED << MaxRounds, round >>
 
 FINISH(self) == /\ pc[self] = "FINISH"
                 /\ TRUE
                 /\ pc' = [pc EXCEPT ![self] = "Done"]
-                /\ UNCHANGED << lock, MaxRetries, rounds, round, retries >>
+                /\ UNCHANGED << MaxRounds, rounds, round >>
 
-thread(self) == P0(self) \/ P0_1(self) \/ P1(self) \/ P1_1(self)
-                   \/ P2(self) \/ P3_1(self) \/ P3_2(self) \/ P4(self)
-                   \/ CS(self) \/ P5(self) \/ P6(self) \/ P7(self)
-                   \/ P8(self) \/ P9(self) \/ P10(self) \/ FINISH(self)
+thread(self) == LOCK(self) \/ L1(self) \/ L2(self) \/ L3(self) \/ L4(self)
+                   \/ INCREMENT(self) \/ WRITE(self) \/ CS(self)
+                   \/ UNLOCK(self) \/ FINISH(self)
 
 (* Allow infinite stuttering to prevent deadlock on termination. *)
 Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
@@ -183,5 +142,5 @@ AtMostOneCritical ==
  t1 /= t2 => ~(pc[t1] = "CS" /\ pc[t2] = "CS")
 =============================================================================
 \* Modification History
-\* Last modified Sun Nov 07 19:24:48 EST 2021 by Test
+\* Last modified Sun Nov 21 20:11:45 EST 2021 by Test
 \* Created Sun Nov 07 16:38:08 EST 2021 by Test

@@ -68,9 +68,10 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
 
             // We lose the election if at least one other process wrote to a round >
             // our current round counter.
-            let lost = {
-                let mut lost = false;
 
+            // We definitively lost if one thread wrote to a round >= 2 AND was the only
+            // thread to write to that round. Otherwise, the lock is still up for grabs.
+            let lost = {
                 // First, update our knowledge of the current round based on what
                 // we might have already written down
                 for (key_round, key_pid) in request_keys.iter() {
@@ -79,14 +80,22 @@ impl<S: Storage + Send + 'static> StorageLock<S> {
                     }
                 }
 
+                let mut max_round = round;
+                let mut max_round_count = 1;
                 for (key_round, key_pid) in request_keys.iter() {
-                    if *key_round > round && *key_pid != self.process_id {
-                        lost = true;
-                        break;
+                    if *key_round > max_round {
+                        max_round = *key_round;
+                        max_round_count = 1
+                    } else if *key_round == max_round {
+                        max_round_count += 1;
                     }
                 }
 
-                lost
+                if max_round > round && max_round_count == 1 {
+                    true
+                } else {
+                    false
+                }
             };
 
             // Someone has advanced beyond our current round, so we need to try again later
